@@ -126,7 +126,7 @@ class SqueezeExcite(nn.Module):
 
 class ConvBnAct(nn.Module):
     def __init__(self, in_chs, out_chs, kernel_size,
-                 stride=1, pad_type='', act_layer=nn.ReLU, norm_layer=nn.BatchNorm2d, norm_kwargs=None):
+                 stride=1, pad_type='', act_layer=nn.ReLU, norm_layer=nn.BatchNorm2d, norm_kwargs=None, antialiased=False):
         super(ConvBnAct, self).__init__()
         assert stride in [1, 2]
         norm_kwargs = norm_kwargs or {}
@@ -149,7 +149,7 @@ class DepthwiseSeparableConv(nn.Module):
     def __init__(self, in_chs, out_chs, dw_kernel_size=3,
                  stride=1, pad_type='', act_layer=nn.ReLU, noskip=False,
                  pw_kernel_size=1, pw_act=False, se_ratio=0., se_kwargs=None,
-                 norm_layer=nn.BatchNorm2d, norm_kwargs=None, drop_connect_rate=0.):
+                 norm_layer=nn.BatchNorm2d, norm_kwargs=None, drop_connect_rate=0., antialiased=False):
         super(DepthwiseSeparableConv, self).__init__()
         assert stride in [1, 2]
         norm_kwargs = norm_kwargs or {}
@@ -220,12 +220,13 @@ class InvertedResidual(nn.Module):
                 mid_chs, mid_chs, dw_kernel_size, stride=stride, padding=pad_type, depthwise=True, **conv_kwargs)
             self.bn2 = norm_layer(mid_chs, **norm_kwargs)
             self.act2 = act_layer(inplace=True)
-        elif self.antialiased == True:
+        elif self.antialiased == True and stride == 2:
             print('Using BlurPool')
             self.conv_dw = select_conv2d(
-                mid_chs, mid_chs, dw_kernel_size, stride=stride, padding=pad_type, depthwise=True, **conv_kwargs)
+                mid_chs, mid_chs, dw_kernel_size, stride=1, padding=pad_type, depthwise=True, **conv_kwargs)
             self.bn2 = norm_layer(mid_chs, **norm_kwargs)
-            self.act2 = act_layer(inplace=True)
+            self.act2 = [act_layer(inplace=True), BlurPool(mid_chs, stride=2)]
+
 
         # Squeeze-and-excitation
         if se_ratio is not None and se_ratio > 0.:
@@ -272,7 +273,7 @@ class CondConvResidual(InvertedResidual):
                  stride=1, pad_type='', act_layer=nn.ReLU, noskip=False,
                  exp_ratio=1.0, exp_kernel_size=1, pw_kernel_size=1,
                  se_ratio=0., se_kwargs=None, norm_layer=nn.BatchNorm2d, norm_kwargs=None,
-                 num_experts=0, drop_connect_rate=0.):
+                 num_experts=0, drop_connect_rate=0., antialiased=False):
 
         self.num_experts = num_experts
         conv_kwargs = dict(num_experts=self.num_experts)
@@ -322,7 +323,7 @@ class EdgeResidual(nn.Module):
 
     def __init__(self, in_chs, out_chs, exp_kernel_size=3, exp_ratio=1.0, fake_in_chs=0,
                  stride=1, pad_type='', act_layer=nn.ReLU, noskip=False, pw_kernel_size=1,
-                 se_ratio=0., se_kwargs=None, norm_layer=nn.BatchNorm2d, norm_kwargs=None, drop_connect_rate=0.):
+                 se_ratio=0., se_kwargs=None, norm_layer=nn.BatchNorm2d, norm_kwargs=None, drop_connect_rate=0., antialiased=False):
         super(EdgeResidual, self).__init__()
         norm_kwargs = norm_kwargs or {}
         mid_chs = make_divisible(fake_in_chs * exp_ratio) if fake_in_chs > 0 else make_divisible(in_chs * exp_ratio)
@@ -380,7 +381,7 @@ class EfficientNetBuilder:
 
     def __init__(self, channel_multiplier=1.0, channel_divisor=8, channel_min=None,
                  pad_type='', act_layer=None, se_kwargs=None,
-                 norm_layer=nn.BatchNorm2d, norm_kwargs=None, drop_connect_rate=0.):
+                 norm_layer=nn.BatchNorm2d, norm_kwargs=None, drop_connect_rate=0., antialiased=False):
         self.channel_multiplier = channel_multiplier
         self.channel_divisor = channel_divisor
         self.channel_min = channel_min
@@ -390,6 +391,7 @@ class EfficientNetBuilder:
         self.norm_layer = norm_layer
         self.norm_kwargs = norm_kwargs
         self.drop_connect_rate = drop_connect_rate
+        self.antialiased = antialiased
 
         # updated during build
         self.in_chs = None
@@ -409,6 +411,8 @@ class EfficientNetBuilder:
         ba['norm_layer'] = self.norm_layer
         ba['norm_kwargs'] = self.norm_kwargs
         ba['pad_type'] = self.pad_type
+        ba['antialiased'] = self.antialiased
+
         # block act fn overrides the model default
         ba['act_layer'] = ba['act_layer'] if ba['act_layer'] is not None else self.act_layer
         assert ba['act_layer'] is not None

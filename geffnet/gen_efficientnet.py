@@ -227,7 +227,7 @@ class GenEfficientNet(nn.Module):
                  channel_multiplier=1.0, channel_divisor=8, channel_min=None,
                  pad_type='', act_layer=nn.ReLU, drop_rate=0., drop_connect_rate=0.,
                  se_kwargs=None, norm_layer=nn.BatchNorm2d, norm_kwargs=None,
-                 weight_init='goog'):
+                 weight_init='goog', antialiased=False):
         super(GenEfficientNet, self).__init__()
         self.drop_rate = drop_rate
 
@@ -240,7 +240,7 @@ class GenEfficientNet(nn.Module):
 
         builder = EfficientNetBuilder(
             channel_multiplier, channel_divisor, channel_min,
-            pad_type, act_layer, se_kwargs, norm_layer, norm_kwargs, drop_connect_rate)
+            pad_type, act_layer, se_kwargs, norm_layer, norm_kwargs, drop_connect_rate, antialiased)
         self.blocks = nn.Sequential(*builder(in_chs, block_args))
         in_chs = builder.in_chs
 
