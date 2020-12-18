@@ -7,6 +7,11 @@ from copy import deepcopy
 
 from .conv2d_layers import *
 from geffnet.activations import *
+import torch
+import torch.nn.parallel
+import numpy as np
+import torch.nn as nn
+import torch.nn.functional as F
 
 __all__ = ['get_bn_args_tf', 'resolve_bn_args', 'resolve_se_args', 'resolve_act_layer', 'make_divisible',
            'round_channels', 'drop_connect', 'SqueezeExcite', 'ConvBnAct', 'DepthwiseSeparableConv',
@@ -194,24 +199,33 @@ class InvertedResidual(nn.Module):
                  stride=1, pad_type='', act_layer=nn.ReLU, noskip=False,
                  exp_ratio=1.0, exp_kernel_size=1, pw_kernel_size=1,
                  se_ratio=0., se_kwargs=None, norm_layer=nn.BatchNorm2d, norm_kwargs=None,
-                 conv_kwargs=None, drop_connect_rate=0.):
+                 conv_kwargs=None, drop_connect_rate=0., antialiased=False):
         super(InvertedResidual, self).__init__()
         norm_kwargs = norm_kwargs or {}
         conv_kwargs = conv_kwargs or {}
         mid_chs: int = make_divisible(in_chs * exp_ratio)
         self.has_residual = (in_chs == out_chs and stride == 1) and not noskip
         self.drop_connect_rate = drop_connect_rate
+        self.antialiased = antialiased
 
         # Point-wise expansion
         self.conv_pw = select_conv2d(in_chs, mid_chs, exp_kernel_size, padding=pad_type, **conv_kwargs)
         self.bn1 = norm_layer(mid_chs, **norm_kwargs)
         self.act1 = act_layer(inplace=True)
 
-        # Depth-wise convolution
-        self.conv_dw = select_conv2d(
-            mid_chs, mid_chs, dw_kernel_size, stride=stride, padding=pad_type, depthwise=True, **conv_kwargs)
-        self.bn2 = norm_layer(mid_chs, **norm_kwargs)
-        self.act2 = act_layer(inplace=True)
+        # Depth-wise convolution with possible blurpool
+        if self.antialiased == False:
+            print(stride)
+            self.conv_dw = select_conv2d(
+                mid_chs, mid_chs, dw_kernel_size, stride=stride, padding=pad_type, depthwise=True, **conv_kwargs)
+            self.bn2 = norm_layer(mid_chs, **norm_kwargs)
+            self.act2 = act_layer(inplace=True)
+        elif self.antialiased == True:
+            print('Using BlurPool')
+            self.conv_dw = select_conv2d(
+                mid_chs, mid_chs, dw_kernel_size, stride=stride, padding=pad_type, depthwise=True, **conv_kwargs)
+            self.bn2 = norm_layer(mid_chs, **norm_kwargs)
+            self.act2 = act_layer(inplace=True)
 
         # Squeeze-and-excitation
         if se_ratio is not None and se_ratio > 0.:
@@ -681,3 +695,117 @@ def initialize_weight_default(m, n=''):
         m.bias.data.zero_()
     elif isinstance(m, nn.Linear):
         nn.init.kaiming_uniform_(m.weight, mode='fan_in', nonlinearity='linear')
+
+# Copyright (c) 2019, Adobe Inc. All rights reserved.
+#
+# This work is licensed under the Creative Commons Attribution-NonCommercial-ShareAlike
+# 4.0 International Public License. To view a copy of this license, visit
+# https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode.
+
+
+# Add BlurPool from https://github.com/adobe/antialiased-cnns/blob/master/antialiased_cnns/blurpool.py
+
+class BlurPool(nn.Module):
+    def __init__(self, channels, pad_type='reflect', filt_size=4, stride=2, pad_off=0):
+        super(BlurPool, self).__init__()
+        self.filt_size = filt_size
+        self.pad_off = pad_off
+        self.pad_sizes = [int(1.*(filt_size-1)/2), int(np.ceil(1.*(filt_size-1)/2)), int(1.*(filt_size-1)/2), int(np.ceil(1.*(filt_size-1)/2))]
+        self.pad_sizes = [pad_size+pad_off for pad_size in self.pad_sizes]
+        self.stride = stride
+        self.off = int((self.stride-1)/2.)
+        self.channels = channels
+
+        if(self.filt_size==1):
+            a = np.array([1.,])
+        elif(self.filt_size==2):
+            a = np.array([1., 1.])
+        elif(self.filt_size==3):
+            a = np.array([1., 2., 1.])
+        elif(self.filt_size==4):
+            a = np.array([1., 3., 3., 1.])
+        elif(self.filt_size==5):
+            a = np.array([1., 4., 6., 4., 1.])
+        elif(self.filt_size==6):
+            a = np.array([1., 5., 10., 10., 5., 1.])
+        elif(self.filt_size==7):
+            a = np.array([1., 6., 15., 20., 15., 6., 1.])
+
+        filt = torch.Tensor(a[:,None]*a[None,:])
+        filt = filt/torch.sum(filt)
+        self.register_buffer('filt', filt[None,None,:,:].repeat((self.channels,1,1,1)))
+
+        self.pad = get_pad_layer(pad_type)(self.pad_sizes)
+
+    def forward(self, inp):
+        if(self.filt_size==1):
+            if(self.pad_off==0):
+                return inp[:,:,::self.stride,::self.stride]
+            else:
+                return self.pad(inp)[:,:,::self.stride,::self.stride]
+        else:
+            return F.conv2d(self.pad(inp), self.filt, stride=self.stride, groups=inp.shape[1])
+
+def get_pad_layer(pad_type):
+    if(pad_type in ['refl','reflect']):
+        PadLayer = nn.ReflectionPad2d
+    elif(pad_type in ['repl','replicate']):
+        PadLayer = nn.ReplicationPad2d
+    elif(pad_type=='zero'):
+        PadLayer = nn.ZeroPad2d
+    else:
+        print('Pad type [%s] not recognized'%pad_type)
+    return PadLayer
+
+class BlurPool1D(nn.Module):
+    def __init__(self, channels, pad_type='reflect', filt_size=3, stride=2, pad_off=0):
+        super(BlurPool1D, self).__init__()
+        self.filt_size = filt_size
+        self.pad_off = pad_off
+        self.pad_sizes = [int(1. * (filt_size - 1) / 2), int(np.ceil(1. * (filt_size - 1) / 2))]
+        self.pad_sizes = [pad_size + pad_off for pad_size in self.pad_sizes]
+        self.stride = stride
+        self.off = int((self.stride - 1) / 2.)
+        self.channels = channels
+
+        # print('Filter size [%i]' % filt_size)
+        if(self.filt_size == 1):
+            a = np.array([1., ])
+        elif(self.filt_size == 2):
+            a = np.array([1., 1.])
+        elif(self.filt_size == 3):
+            a = np.array([1., 2., 1.])
+        elif(self.filt_size == 4):
+            a = np.array([1., 3., 3., 1.])
+        elif(self.filt_size == 5):
+            a = np.array([1., 4., 6., 4., 1.])
+        elif(self.filt_size == 6):
+            a = np.array([1., 5., 10., 10., 5., 1.])
+        elif(self.filt_size == 7):
+            a = np.array([1., 6., 15., 20., 15., 6., 1.])
+
+        filt = torch.Tensor(a)
+        filt = filt / torch.sum(filt)
+        self.register_buffer('filt', filt[None, None, :].repeat((self.channels, 1, 1)))
+
+        self.pad = get_pad_layer_1d(pad_type)(self.pad_sizes)
+
+    def forward(self, inp):
+        if(self.filt_size == 1):
+            if(self.pad_off == 0):
+                return inp[:, :, ::self.stride]
+            else:
+                return self.pad(inp)[:, :, ::self.stride]
+        else:
+            return F.conv1d(self.pad(inp), self.filt, stride=self.stride, groups=inp.shape[1])
+
+def get_pad_layer_1d(pad_type):
+    if(pad_type in ['refl', 'reflect']):
+        PadLayer = nn.ReflectionPad1d
+    elif(pad_type in ['repl', 'replicate']):
+        PadLayer = nn.ReplicationPad1d
+    elif(pad_type == 'zero'):
+        PadLayer = nn.ZeroPad1d
+    else:
+        print('Pad type [%s] not recognized' % pad_type)
+    return PadLayer
