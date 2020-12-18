@@ -225,7 +225,7 @@ class InvertedResidual(nn.Module):
             self.conv_dw = select_conv2d(
                 mid_chs, mid_chs, dw_kernel_size, stride=1, padding=pad_type, depthwise=True, **conv_kwargs)
             self.bn2 = norm_layer(mid_chs, **norm_kwargs)
-            self.act2 = [act_layer(inplace=True), BlurPool(mid_chs, stride=2)]
+            self.act2 = nn.Sequential(act_layer(inplace=True), BlurPool(mid_chs, stride=2))
 
 
         # Squeeze-and-excitation
