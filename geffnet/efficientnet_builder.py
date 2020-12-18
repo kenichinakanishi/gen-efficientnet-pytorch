@@ -214,19 +214,16 @@ class InvertedResidual(nn.Module):
         self.act1 = act_layer(inplace=True)
 
         # Depth-wise convolution with possible blurpool
-        if self.antialiased == False:
-            print(stride)
-            self.conv_dw = select_conv2d(
-                mid_chs, mid_chs, dw_kernel_size, stride=stride, padding=pad_type, depthwise=True, **conv_kwargs)
-            self.bn2 = norm_layer(mid_chs, **norm_kwargs)
-            self.act2 = act_layer(inplace=True)
-        elif self.antialiased == True and stride == 2:
-            print('Using BlurPool')
+        if self.antialiased == True and stride == 2:
             self.conv_dw = select_conv2d(
                 mid_chs, mid_chs, dw_kernel_size, stride=1, padding=pad_type, depthwise=True, **conv_kwargs)
             self.bn2 = norm_layer(mid_chs, **norm_kwargs)
             self.act2 = nn.Sequential(act_layer(inplace=True), BlurPool(mid_chs, stride=2))
-
+        else:
+            self.conv_dw = select_conv2d(
+                mid_chs, mid_chs, dw_kernel_size, stride=stride, padding=pad_type, depthwise=True, **conv_kwargs)
+            self.bn2 = norm_layer(mid_chs, **norm_kwargs)
+            self.act2 = act_layer(inplace=True)
 
         # Squeeze-and-excitation
         if se_ratio is not None and se_ratio > 0.:
